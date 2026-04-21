@@ -393,6 +393,7 @@ body.dark .news-dot { background: var(--primary-light); }
  <button class="nav-btn" onclick="switchTab(this)">波段股票池</button>
  <button class="nav-btn" onclick="switchTab(this)">月度金股</button>
  <button class="nav-btn" onclick="switchTab(this)">精选基金池</button>
+ <button class="nav-btn" onclick="switchTab(this)">📈调仓管理</button>
  </div>
  <div class="header-right">
  <div class="time-area">
@@ -578,6 +579,10 @@ function showTab(tab) {
  } else if (tab === '精选基金池') {
  main.style.gridTemplateColumns = '1fr';
  main.innerHTML = renderFundPool();
+ } else if (tab === '📈调仓管理') {
+ main.style.gridTemplateColumns = '1fr 380px';
+ main.innerHTML = renderTiaocangPanel();
+ refreshTiaocangShared();
  }
 }
 
@@ -1024,6 +1029,167 @@ function renderFundPool() {
 async function refreshAll() {
  await Promise.all([fetchAStocks(), fetchGlobal(), fetchFearGreed(), refreshNews(), fetchIPO()]);
 }
+
+// ============ 调仓管理面板（嵌入波段池）============
+const TC_SHARED_HOLDINGS = 'furong_shared_holdings';
+const TC_SHARED_CASH = 'furong_shared_cash';
+
+async function refreshTiaocangShared() {
+  const holdings = JSON.parse(localStorage.getItem(TC_SHARED_HOLDINGS) || '[]');
+  const cash = parseFloat(localStorage.getItem(TC_SHARED_CASH) || '100000');
+  renderTiaocangList(holdings, cash);
+  await refreshTiaocangQuotes(holdings);
+}
+
+async function refreshTiaocangQuotes(holdings) {
+  if (!holdings.length) return;
+  // Fetch real-time quotes via Sina Finance JSONP
+  const codes = holdings.map(h => {
+    const c = h.code.replace(/^(sh|sz)/i, '');
+    if (c.startsWith('6')) return 'sh' + c;
+    return 'sz' + c;
+  }).join(',');
+  const cbName = 'tc_cb_' + Date.now();
+  await new Promise((resolve) => {
+    window[cbName] = function(data) {
+      try {
+        if (data && data.length !== undefined) {
+          data.forEach((item, i) => {
+            if (!item || !item[1]) return;
+            const parts = item[1].split(',');
+            if (parts.length < 32) return;
+            const code = holdings[i] ? holdings[i].code.replace(/^(sh|sz)/i, '').toLowerCase() : '';
+            holdings[i]._name = parts[0].replace(/"/g, '');
+            holdings[i]._price = parseFloat(parts[3]) || 0;
+            holdings[i]._yc = parseFloat(parts[2]) || 0;
+          });
+        }
+      } catch(e) {}
+      delete window[cbName];
+      resolve();
+    };
+    const timer = setTimeout(() => { try { delete window[cbName]; } catch(e) {} resolve(); }, 5000);
+    const script = document.createElement('script');
+    script.src = 'https://hq.sinajs.cn/list=' + codes + '&callback=' + cbName + '&_=' + Date.now();
+    document.head.appendChild(script);
+    setTimeout(() => { try { document.head.removeChild(script); } catch(e) {} }, 6000);
+  });
+  renderTiaocangList(holdings, parseFloat(localStorage.getItem(TC_SHARED_CASH) || '100000'));
+}
+
+function renderTiaocangList(holdings, cash) {
+  const el = document.getElementById('tcHoldingsList');
+  const summaryEl = document.getElementById('tcSummary');
+  if (!el) return;
+  
+  if (!holdings.length) {
+    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:8px">📋</div><div>暂无调仓记录</div><div style="font-size:12px;margin-top:4px">去调仓管理页面添加持仓</div></div>';
+    if (summaryEl) summaryEl.innerHTML = '<span style="color:var(--text-muted)">持仓 0 只</span>';
+    return;
+  }
+
+  let totalValue = 0, totalCost = 0;
+  let rows = '';
+  holdings.forEach(h => {
+    const price = h._price || h.lastPrice || h.price || 0;
+    const name = h._name || h.name || h.code;
+    const yc = h._yc || h.cost || 0;
+    const changePct = yc ? (((price - yc) / yc) * 100).toFixed(2) : '0.00';
+    const marketVal = price * h.amount;
+    const profitVal = marketVal - (h.cost * h.amount);
+    const profitPct = h.cost ? (((price - h.cost) / h.cost) * 100).toFixed(2) : '0.00';
+    totalValue += marketVal;
+    totalCost += h.cost * h.amount;
+    const isUp = parseFloat(changePct) >= 0;
+    const isProfit = profitVal >= 0;
+    const tagClass = h.tag === 'buy' ? 'tag-upcoming' : h.tag === 'sell' ? 'tag-pending' : h.tag === 'watch' ? 'tag-upcoming' : 'tag-upcoming';
+    const tagText = h.tag === 'buy' ? '买入' : h.tag === 'sell' ? '卖出' : h.tag === 'watch' ? '观察' : '波段';
+    rows += '<tr style="border-bottom:1px solid var(--border)">'
+      + '<td style="padding:10px"><div style="font-weight:600">' + name + '</div><div style="font-size:11px;color:var(--text-muted)">' + h.code + ' <span class="tag ' + tagClass + '">' + tagText + '</span></div></td>'
+      + '<td style="text-align:right;padding:10px"><div style="font-weight:700">' + (price ? '¥' + price.toFixed(2) : '--') + '</div><div style="font-size:11px;color:' + (isUp ? 'var(--red)' : 'var(--green)') + '">' + (isUp ? '▲' : '▼') + ' ' + Math.abs(parseFloat(changePct)) + '%</div></td>'
+      + '<td style="text-align:right;padding:10px"><div>¥' + h.cost.toFixed(2) + '</div><div style="font-size:11px;color:var(--text-muted)">' + h.amount + '股</div></td>'
+      + '<td style="text-align:right;padding:10px;font-weight:700;color:' + (isProfit ? 'var(--green)' : 'var(--red)') + '">' + (isProfit ? '+' : '') + '¥' + profitVal.toFixed(2) + '<br><span style="font-size:11px">' + (profitPct >= 0 ? '+' : '') + profitPct + '%</span></td>'
+      + '</tr>';
+  });
+  el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f3f4f6"><th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--text-muted)">股票</th><th style="text-align:right;padding:8px 10px;font-size:12px;color:var(--text-muted)">现价</th><th style="text-align:right;padding:8px 10px;font-size:12px;color:var(--text-muted)">成本/持仓</th><th style="text-align:right;padding:8px 10px;font-size:12px;color:var(--text-muted)">盈亏</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  
+  const totalProfit = totalValue - totalCost;
+  const totalProfitRate = totalCost ? (totalProfit / totalCost * 100) : 0;
+  if (summaryEl) {
+    summaryEl.innerHTML = '<span style="font-weight:600">持仓 ' + holdings.length + ' 只</span>'
+      + ' | 市值 <span style="color:var(--primary)">¥' + totalValue.toFixed(0) + '</span>'
+      + ' | 盈亏 <span style="color:' + (totalProfit >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (totalProfit >= 0 ? '+' : '') + '¥' + totalProfit.toFixed(0) + ' (' + (totalProfitRate >= 0 ? '+' : '') + totalProfitRate.toFixed(1) + '%)</span>'
+      + ' | 现金 <span style="color:var(--accent)">¥' + cash.toFixed(0) + '</span>';
+  }
+}
+
+function renderTiaocangPanel() {
+  const holdings = JSON.parse(localStorage.getItem(TC_SHARED_HOLDINGS) || '[]');
+  const cash = parseFloat(localStorage.getItem(TC_SHARED_CASH) || '100000');
+  let totalValue = 0, totalCost = 0;
+  holdings.forEach(h => {
+    const price = h.lastPrice || h.price || 0;
+    totalValue += price * h.amount;
+    totalCost += h.cost * h.amount;
+  });
+  const totalProfit = totalValue - totalCost;
+  const totalProfitRate = totalCost ? (totalProfit / totalCost * 100) : 0;
+  return `
+<div style="display:grid;grid-template-columns:1fr 380px;gap:24px">
+
+ <!-- 调仓记录 -->
+ <div class="card animate-in">
+  <div class="card-header">
+   <div class="card-title">📈 调仓记录</div>
+   <a href="https://tiancaixuanfeng.github.io/furong-boduo-tiaocang/" target="_blank" style="font-size:12px;color:var(--primary-light);font-weight:600">去调仓页面 ↗</a>
+  </div>
+  <div class="card-body" style="padding:12px 16px">
+   <div id="tcSummary" style="font-size:13px;color:var(--text-muted);margin-bottom:12px;padding:8px 12px;background:var(--bg);border-radius:8px">
+    持仓 ${holdings.length} 只 | 市值 <span style="color:var(--primary)">¥${totalValue.toFixed(0)}</span>
+    | 盈亏 <span style="color:${totalProfit >= 0 ? 'var(--green)' : 'var(--red)'}">${totalProfit >= 0 ? '+' : ''}¥${totalProfit.toFixed(0)} (${totalProfitRate >= 0 ? '+' : ''}${totalProfitRate.toFixed(1)}%)</span>
+    | 现金 <span style="color:var(--accent)">¥${cash.toFixed(0)}</span>
+   </div>
+   <div id="tcHoldingsList">
+    <div style="text-align:center;padding:32px;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:8px">📋</div><div>暂无调仓记录</div><div style="font-size:12px;margin-top:4px"><a href="https://tiancaixuanfeng.github.io/furong-boduo-tiaocang/" target="_blank" style="color:var(--primary-light)">去调仓管理页面添加 →</a></div></div>
+   </div>
+  </div>
+ </div>
+
+ <!-- 快捷操作 -->
+ <div style="display:flex;flex-direction:column;gap:16px">
+  <div class="card animate-in">
+   <div class="card-header">
+    <div class="card-title">🚨 调仓信号</div>
+   </div>
+   <div class="card-body">
+    <div style="display:flex;flex-direction:column;gap:8px">
+     ${holdings.length === 0 ? '<div style="text-align:center;padding:16px;color:var(--text-muted)">添加持仓后显示信号</div>' : ''}
+     ${holdings.filter(h => { const fromCost = h.cost ? (((h.lastPrice||h.price) - h.cost) / h.cost * 100) : 0; return fromCost <= -5; }).map(h => '<div style="padding:8px 12px;background:#D1FAE5;border-radius:8px;border:1px solid #6EE7B7;font-size:13px"><b>🔔 ' + (h.name||h.code) + ' 补仓信号</b><br><span style="color:var(--text-muted);font-size:11px">浮亏' + (((h.lastPrice||h.price) - h.cost) / h.cost * 100).toFixed(1) + '%，关注补仓机会</span></div>').join('')}
+     ${holdings.filter(h => { const fromCost = h.cost ? (((h.lastPrice||h.price) - h.cost) / h.cost * 100) : 0; return fromCost >= 15; }).map(h => '<div style="padding:8px 12px;background:#FEE2E2;border-radius:8px;border:1px solid #FCA5A5;font-size:13px"><b>⚠️ ' + (h.name||h.code) + ' 止盈信号</b><br><span style="color:var(--text-muted);font-size:11px">浮盈' + (((h.lastPrice||h.price) - h.cost) / h.cost * 100).toFixed(1) + '%，建议分批止盈</span></div>').join('')}
+    </div>
+   </div>
+  </div>
+
+  <div class="card animate-in">
+   <div class="card-header">
+    <div class="card-title">📖 使用说明</div>
+   </div>
+   <div class="card-body" style="font-size:13px;color:var(--text-muted);line-height:1.8">
+    <p>📱 <b>调仓管理</b>：独立页面，管理持仓成本和盈亏</p>
+    <p style="margin-top:8px">📊 <b>波段股票池</b>：精选波段机会个股</p>
+    <p style="margin-top:8px">💡 两个页面共享持仓数据</p>
+    <a href="https://tiancaixuanfeng.github.io/furong-boduo-tiaocang/" target="_blank" class="btn" style="display:block;text-align:center;margin-top:12px;background:var(--primary-light);color:white;border:none;padding:10px;border-radius:8px;font-weight:700">
+     打开调仓管理页面 ↗
+    </a>
+   </div>
+  </div>
+ </div>
+
+</div>
+  `;
+}
+
+
 
 // Init
 refreshAll();
