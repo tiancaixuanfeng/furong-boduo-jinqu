@@ -1034,50 +1034,63 @@ async function refreshAll() {
 const TC_SHARED_HOLDINGS = 'furong_shared_holdings';
 const TC_SHARED_CASH = 'furong_shared_cash';
 
+// 腾讯 qt.gtimg.cn 支持 CORS，用 fetch 直接调用（GitHub Pages 可用）
 async function refreshTiaocangShared() {
   const holdings = JSON.parse(localStorage.getItem(TC_SHARED_HOLDINGS) || '[]');
   const cash = parseFloat(localStorage.getItem(TC_SHARED_CASH) || '100000');
   renderTiaocangList(holdings, cash);
-  await refreshTiaocangQuotes(holdings);
+  await refreshTiaocangQuotes(holdings, cash);
 }
 
-async function refreshTiaocangQuotes(holdings) {
+// qt.gtimg.cn fetch 行情
+const _jCache = {};
+async function refreshTiaocangQuotes(holdings, cash) {
   if (!holdings.length) return;
-  // Fetch real-time quotes via Sina Finance JSONP
-  const codes = holdings.map(h => {
-    const c = h.code.replace(/^(sh|sz)/i, '');
-    if (c.startsWith('6')) return 'sh' + c;
-    return 'sz' + c;
-  }).join(',');
-  const cbName = 'tc_cb_' + Date.now();
-  await new Promise((resolve) => {
-    window[cbName] = function(data) {
-      try {
-        if (data && data.length !== undefined) {
-          data.forEach((item, i) => {
-            if (!item || !item[1]) return;
-            const parts = item[1].split(',');
-            if (parts.length < 32) return;
-            const code = holdings[i] ? holdings[i].code.replace(/^(sh|sz)/i, '').toLowerCase() : '';
-            holdings[i]._name = parts[0].replace(/"/g, '');
-            holdings[i]._price = parseFloat(parts[3]) || 0;
-            holdings[i]._yc = parseFloat(parts[2]) || 0;
-          });
-        }
-      } catch(e) {}
-      delete window[cbName];
-      resolve();
-    };
-    const timer = setTimeout(() => { try { delete window[cbName]; } catch(e) {} resolve(); }, 5000);
-    const script = document.createElement('script');
-    script.src = 'https://hq.sinajs.cn/list=' + codes + '&callback=' + cbName + '&_=' + Date.now();
-    document.head.appendChild(script);
-    setTimeout(() => { try { document.head.removeChild(script); } catch(e) {} }, 6000);
+  // 批量 fetch
+  const qtCodes = holdings.map(h => {
+    const code = String(h.code).replace(/^(sh|sz|bj)/i, '');
+    if (!/^\d{6}$/.test(code)) return null;
+    if (code.startsWith('300')) return 'sz' + code;
+    if (/^[56]/.test(code)) return 'sh' + code;
+    return 'sz' + code;
+  }).filter(Boolean);
+  if (!qtCodes.length) return;
+  try {
+    const resp = await fetch('https://qt.gtimg.cn/q=' + qtCodes.join(','));
+    const text = await resp.text();
+    const lines = text.trim().split('\n');
+    lines.forEach(line => {
+      const m = line.match(/v_(\w+)="([^"]+)"/);
+      if (!m) return;
+      const qtCode = m[1];
+      const parts = m[2].split('~');
+      if (parts.length < 32) return;
+      const rawCode = qtCode.replace(/^(sh|sz|bj)/i, '').toLowerCase();
+      _jCache[rawCode] = {
+        name: parts[1],
+        price: parseFloat(parts[3]) || 0,
+        yc: parseFloat(parts[4]) || 0,
+        change: (parseFloat(parts[3]) - parseFloat(parts[4])).toFixed(2),
+        changePct: (() => {
+          const p = parseFloat(parts[3]), y = parseFloat(parts[4]);
+          return y ? ((p - y) / y * 100).toFixed(2) : '0.00';
+        })()
+      };
+    });
+  } catch(e) { console.warn('行情获取失败', e); }
+  // 把数据写回 holdings 并重新渲染
+  holdings.forEach(h => {
+    const key = String(h.code).replace(/^(sh|sz|bj)/i, '').toLowerCase();
+    const q = _jCache[key] || {};
+    h._name = q.name || h.name || '';
+    h._price = q.price || 0;
+    h._change = q.change || '0.00';
+    h._changePct = q.changePct || '0.00';
+    h._yc = q.yc || h.cost || 0;
   });
-  renderTiaocangList(holdings, parseFloat(localStorage.getItem(TC_SHARED_CASH) || '100000'));
+  renderTiaocangList(holdings, cash);
 }
 
-function renderTiaocangList(holdings, cash) {
   const el = document.getElementById('tcHoldingsList');
   const summaryEl = document.getElementById('tcSummary');
   if (!el) return;
